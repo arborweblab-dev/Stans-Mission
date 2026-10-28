@@ -16,9 +16,27 @@ import {
   Share2,
   RefreshCw,
   QrCode,
-  Sliders,
-  Send
+  Lock,
+  LogOut,
+  ExternalLink
 } from 'lucide-react';
+
+// Firebase imports for user authentication & cloud storage
+import { initializeApp } from 'firebase/app';
+import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged, signOut } from 'firebase/auth';
+import { getFirestore, collection, addDoc, onSnapshot, query, orderBy } from 'firebase/firestore';
+
+import { washtenawCharities } from './data/charities';
+
+// Initialize Firebase safely with fallback config
+const firebaseConfig = typeof __firebase_config !== 'undefined' 
+  ? JSON.parse(__firebase_config) 
+  : { apiKey: "demo-key", authDomain: "demo.firebaseapp.com", projectId: "demo-project" };
+
+const app = initializeApp(firebaseConfig);
+const auth = getAuth(app);
+const db = getFirestore(app);
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'stans-mission-app';
 
 export default function App() {
   const [activeTab, setActiveTab] = useState('home');
@@ -31,6 +49,9 @@ export default function App() {
   const [userSupporterName, setUserSupporterName] = useState('A2 Dog Friend');
   const [userSupporterMsg, setUserSupporterMsg] = useState('Keep up the great work Stan! 🐾');
   
+  // Auth & Cloud State
+  const [user, setUser] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
   const [leaderboard, setLeaderboard] = useState([
     { name: 'A2 Dog Lover', amount: 150, message: 'Keep up the great work Stan!' },
     { name: 'Ann Arbor Barkery', amount: 100, message: 'Treats on us next time!' },
@@ -38,33 +59,93 @@ export default function App() {
     { name: 'Anonymous Friend', amount: 50, message: 'For the grass rolling fund!' },
   ]);
 
-  // Handle donation flow simulation
-  const handleDonate = (amount, type) => {
+  // Firebase Auth Lifecycle
+  useEffect(() => {
+    const initAuth = async () => {
+      try {
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+          await signInWithCustomToken(auth, __initial_auth_token);
+        } else {
+          await signInAnonymously(auth);
+        }
+      } catch (err) {
+        console.error("Auth initialization error:", err);
+      } finally {
+        setAuthLoading(false);
+      }
+    };
+    initAuth();
+    const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
+      setUser(currentUser);
+    });
+    return () => unsubscribe();
+  }, []);
+
+  // Fetch Supabase / Firestore live donations
+  useEffect(() => {
+    if (!user) return;
+    try {
+      const q = collection(db, 'artifacts', appId, 'public', 'data', 'donations');
+      const unsubscribeData = onSnapshot(q, (snapshot) => {
+        const fetched = [];
+        snapshot.forEach((doc) => {
+          fetched.push(doc.data());
+        });
+        if (fetched.length > 0) {
+          // Sort descending by amount or timestamp
+          fetched.sort((a, b) => (b.amount || 0) - (a.amount || 0));
+          setLeaderboard(fetched);
+        }
+      }, (error) => {
+        console.debug("Firestore snapshot note:", error);
+      });
+      return () => unsubscribeData();
+    } catch (e) {
+      console.debug("Firestore not fully configured or offline mode:", e);
+    }
+  }, [user]);
+
+  // Handle donation flow & Stripe link redirection
+  const handleDonate = async (amount, type) => {
     setIsProcessing(true);
-    setTimeout(() => {
+    
+    // Simulate or trigger real Stripe link if available
+    setTimeout(async () => {
       setIsProcessing(false);
       let titleName = userSupporterName.trim() || 'Generous Friend';
-      let msg = userSupporterMsg.trim() || (type === 'photo' ? 'Snapped a photo with Stan! 📸' : type === 'pet' ? `Gave Stan pets (${stanStatus === 'grass' ? 'messy grass fur!' : 'fresh bath fluff!'}) 🐾` : `Helped support ${selectedCharity.name} 💚`);
+      let msg = userSupporterMsg.trim() || (type === 'photo' ? 'Snapped a photo with Stan! 📸' : type === 'pet' ? `Gave Stan pets (${stanStatus === 'grass' ? 'messy grass fur!' : 'fresh bath fluff!'}) 🐾` : `Helped raise money for ${selectedCharity.name} 💚`);
 
       const newEntry = {
         name: titleName,
         amount: amount,
-        message: msg
+        message: msg,
+        timestamp: Date.now()
       };
+
+      // Try saving to Firestore if available
+      try {
+        if (user) {
+          await addDoc(collection(db, 'artifacts', appId, 'public', 'data', 'donations'), newEntry);
+        }
+      } catch (e) {
+        console.debug("Saved locally to state");
+      }
+
       setLeaderboard([newEntry, ...leaderboard]);
       setSuccessModal({
         amount,
         charity: selectedCharity.name,
-        type
+        type,
+        stripeUrl: selectedCharity.stripeUrl
       });
-    }, 800);
+    }, 700);
   };
 
   return (
-    <div className="min-h-screen bg-neutral-950 text-neutral-100 font-sans selection:bg-emerald-500 selection:text-neutral-950 pb-24 md:pb-8 flex justify-center">
+    <div className="min-h-screen bg-neutral-950 text-neutral-100 font-sans selection:bg-emerald-500 selection:text-neutral-950 flex justify-center">
       
-      {/* Mobile Device Container Frame (app-like view) */}
-      <div className="w-full max-w-md md:max-w-xl bg-neutral-900 md:my-6 md:rounded-[40px] md:border-[8px] md:border-neutral-800 shadow-2xl flex flex-col min-h-screen md:min-h-[850px] md:max-h-[92vh] relative overflow-hidden">
+      {/* Mobile App Frame (Phone Frame Container) */}
+      <div className="w-full max-w-md bg-neutral-900 md:my-6 md:rounded-[40px] md:border-[8px] md:border-neutral-800 shadow-2xl flex flex-col min-h-screen md:min-h-[850px] md:max-h-[92vh] relative overflow-hidden">
 
         {/* App Status Bar (Mobile feel) */}
         <div className="hidden md:flex items-center justify-between px-6 pt-3 pb-1 text-[11px] text-neutral-400 font-mono border-b border-neutral-800/60 bg-neutral-950/40">
@@ -82,17 +163,13 @@ export default function App() {
         <header className="bg-neutral-900/95 backdrop-blur-md px-5 py-4 border-b border-neutral-800 sticky top-0 z-40 flex items-center justify-between">
           <div className="flex items-center space-x-3">
             <div className="w-10 h-10 bg-neutral-800 rounded-2xl flex items-center justify-center border-2 border-emerald-500 shadow-inner overflow-hidden flex-shrink-0">
-              <img 
-                src="PXL_20261013_195011835.jpg" 
-                alt="Stan Logo" 
-                className="w-full h-full object-cover"
-              />
+              <span className="text-xl">🐾</span>
             </div>
             <div>
               <h1 className="text-base font-black tracking-tight text-neutral-100 flex items-center gap-1.5">
                 STAN'S MISSION <span className="text-[9px] bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 px-1.5 py-0.5 rounded-full font-bold uppercase">Washtenaw</span>
               </h1>
-              <p className="text-[11px] text-neutral-400 truncate max-w-[200px]">Helping raise money for dog orgs</p>
+              <p className="text-[11px] text-neutral-400 truncate max-w-[190px]">Helping raise money for dog orgs</p>
             </div>
           </div>
 
@@ -108,7 +185,7 @@ export default function App() {
         </header>
 
         {/* Main App Scrollable Content Area */}
-        <main className="flex-1 overflow-y-auto p-4 space-y-6 pb-20">
+        <main className="flex-1 overflow-y-auto p-4 space-y-5 pb-24">
           
           {/* TAB 1: HOME / MISSION */}
           {activeTab === 'home' && (
@@ -125,7 +202,7 @@ export default function App() {
                       <p className="text-[11px] text-neutral-400">Select current texture for in-person tipping:</p>
                     </div>
                   </div>
-                  <span className="text-xs bg-emerald-500 text-neutral-950 font-extrabold px-2 py-0.5 rounded-full">
+                  <span className="text-xs bg-emerald-500 text-neutral-950 font-extrabold px-2.5 py-0.5 rounded-full">
                     {stanStatus === 'grass' ? '$1 Pet' : stanStatus === 'bath' ? '$3 Pet' : '$2 Pet'}
                   </span>
                 </div>
@@ -159,25 +236,25 @@ export default function App() {
 
               {/* Hero Banner Card */}
               <div className="relative rounded-3xl overflow-hidden shadow-2xl bg-neutral-950 border border-neutral-800">
-                <div className="aspect-[16/10] relative">
-                  <img 
-                    src="PXL_20261013_195011835.jpg" 
-                    alt="Stan smiling" 
-                    className="w-full h-full object-cover"
-                  />
-                  <div className="absolute inset-0 bg-gradient-to-t from-neutral-950 via-neutral-950/40 to-transparent"></div>
-                  <div className="absolute bottom-3 left-4 right-4 space-y-2">
+                <div className="aspect-[16/10] relative bg-neutral-900 flex items-center justify-center">
+                  <div className="text-center p-6 space-y-2">
+                    <span className="text-5xl">🐕‍🦺</span>
+                    <h3 className="font-bold text-neutral-300 text-sm">Stan the Underbite King</h3>
+                    <p className="text-[10px] text-neutral-500">Black, grey & white coat with a love for green!</p>
+                  </div>
+                  <div className="absolute inset-0 bg-gradient-to-t from-neutral-950 via-neutral-950/20 to-transparent"></div>
+                  <div className="absolute bottom-3 left-4 right-4 space-y-1.5">
                     <div className="inline-flex items-center gap-1.5 bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider">
                       <MapPin className="w-3 h-3" /> Washtenaw County Ambassador
                     </div>
-                    <h2 className="text-xl sm:text-2xl font-black text-neutral-100 leading-tight">
+                    <h2 className="text-xl font-black text-neutral-100 leading-tight">
                       Hi, I'm Stan! 🐾 Making Underbites Cool Again.
                     </h2>
                   </div>
                 </div>
                 <div className="p-4 space-y-3 bg-neutral-950">
                   <p className="text-xs text-neutral-300 leading-relaxed">
-                    I'm on a mission to help raise money for incredible Washtenaw dog rescues and shelters. In late 2027, I'll take my underbite global to support dog missions worldwide!
+                    I'm on a mission to help raise money for incredible Washtenaw dog rescues and shelters. In the future, I'll take my underbite global to support dog missions worldwide!
                   </p>
                   <div className="flex gap-2 pt-1">
                     <button 
@@ -349,9 +426,14 @@ export default function App() {
                     {isProcessing ? 'Processing...' : <><CreditCard className="w-3.5 h-3.5"/> Pay via Stripe</>}
                   </button>
                 </div>
-                <p className="text-[10px] text-neutral-500 text-center flex items-center justify-center gap-1">
-                  <ShieldCheck className="w-3 h-3 text-emerald-400" /> Secured with Stripe 256-bit encryption
-                </p>
+                
+                {/* Stripe Product URL Helper Note */}
+                <div className="p-3 bg-neutral-900/80 rounded-2xl border border-neutral-800 text-[11px] text-neutral-400 space-y-1">
+                  <p className="font-semibold text-neutral-300 flex items-center gap-1">
+                    <ExternalLink className="w-3 h-3 text-emerald-400" /> Stripe Integration Ready:
+                  </p>
+                  <p>Paste your Stripe Product URLs in <code className="text-emerald-400 font-mono">src/data/charities.js</code> to link direct live checkouts.</p>
+                </div>
               </div>
             </div>
           )}
@@ -423,58 +505,14 @@ export default function App() {
                   <Camera className="w-4 h-4 text-emerald-400" /> Washtenaw Photo Gallery
                 </h3>
                 <div className="grid grid-cols-3 gap-2">
-                  <div className="rounded-xl overflow-hidden aspect-square bg-neutral-900 border border-neutral-800 flex items-center justify-center">
-                    <span className="text-xl">🐾</span>
+                  <div className="rounded-xl overflow-hidden aspect-square bg-neutral-900 border border-neutral-800 flex items-center justify-center text-xs text-neutral-500">
+                    Stan 1
                   </div>
-                  <div className="rounded-xl overflow-hidden aspect-square bg-neutral-900 border border-neutral-800 flex items-center justify-center">
-                    <span className="text-xl">🍂</span>
+                  <div className="rounded-xl overflow-hidden aspect-square bg-neutral-900 border border-neutral-800 flex items-center justify-center text-xs text-neutral-500">
+                    Stan 2
                   </div>
-                  <div className="rounded-xl overflow-hidden aspect-square bg-neutral-900 border border-neutral-800 flex items-center justify-center">
-                    <span className="text-xl">✨</span>
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* TAB 4: WORLD TOUR (Late 2027) */}
-          {activeTab === 'tour' && (
-            <div className="space-y-4 animate-fadeIn">
-              <div className="bg-neutral-950 border border-neutral-800 p-5 rounded-3xl space-y-3">
-                <div className="inline-flex items-center gap-1.5 bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase">
-                  <Globe className="w-3 h-3" /> Future Aspirations
-                </div>
-                <h3 className="font-black text-lg text-neutral-100">Stan's World Tour 🌍</h3>
-                <p className="text-xs text-neutral-300 leading-relaxed">
-                  While Stan is currently focused on Washtenaw County, his ambitions are global! In late 2027, Stan plans to travel the world to help raise money for international rescue sanctuaries and canine therapy networks.
-                </p>
-              </div>
-
-              <div className="space-y-2.5">
-                <div className="bg-neutral-950 p-4 rounded-3xl border border-neutral-800 flex items-start gap-3">
-                  <div className="w-8 h-8 rounded-xl bg-emerald-500/20 text-emerald-400 flex items-center justify-center font-bold text-xs flex-shrink-0">1</div>
-                  <div>
-                    <h4 className="font-bold text-xs text-neutral-100">Washtenaw County HQ</h4>
-                    <p className="text-[11px] text-neutral-400 mt-0.5">Ann Arbor, Ypsilanti, and local townships. Active now supporting local shelter heroes.</p>
-                    <span className="text-[10px] text-emerald-400 font-bold mt-1 inline-block">✓ Active Today</span>
-                  </div>
-                </div>
-
-                <div className="bg-neutral-950 p-4 rounded-3xl border border-neutral-800 flex items-start gap-3">
-                  <div className="w-8 h-8 rounded-xl bg-neutral-900 text-neutral-400 flex items-center justify-center font-bold text-xs flex-shrink-0">2</div>
-                  <div>
-                    <h4 className="font-bold text-xs text-neutral-100">North American Bark Tour</h4>
-                    <p className="text-[11px] text-neutral-400 mt-0.5">Roadtripping across state lines to visit iconic national parks and regional adoption fairs.</p>
-                    <span className="text-[10px] text-neutral-500 font-bold mt-1 inline-block">Coming Late 2027</span>
-                  </div>
-                </div>
-
-                <div className="bg-neutral-950 p-4 rounded-3xl border border-neutral-800 flex items-start gap-3">
-                  <div className="w-8 h-8 rounded-xl bg-neutral-900 text-neutral-400 flex items-center justify-center font-bold text-xs flex-shrink-0">3</div>
-                  <div>
-                    <h4 className="font-bold text-xs text-neutral-100">Global Paws Without Borders</h4>
-                    <p className="text-[11px] text-neutral-400 mt-0.5">Passport stamped! Stan takes flight to support international rescue organizations.</p>
-                    <span className="text-[10px] text-neutral-500 font-bold mt-1 inline-block">Future Vision (Late 2027+)</span>
+                  <div className="rounded-xl overflow-hidden aspect-square bg-neutral-900 border border-neutral-800 flex items-center justify-center text-xs text-neutral-500">
+                    Stan 3
                   </div>
                 </div>
               </div>
@@ -484,10 +522,10 @@ export default function App() {
         </main>
 
         {/* Bottom App Navigation Bar (App-like Dock) */}
-        <nav className="absolute bottom-0 left-0 right-0 bg-neutral-950/95 backdrop-blur-md border-t border-neutral-800 px-3 py-2 flex items-center justify-around z-40">
+        <nav className="absolute bottom-0 left-0 right-0 bg-neutral-950/95 backdrop-blur-md border-t border-neutral-800 px-6 py-2.5 flex items-center justify-around z-40">
           <button 
             onClick={() => setActiveTab('home')}
-            className={`flex flex-col items-center gap-1 py-1 px-3 rounded-2xl transition ${activeTab === 'home' ? 'text-emerald-400 font-bold' : 'text-neutral-400 hover:text-neutral-200'}`}
+            className={`flex flex-col items-center gap-1 py-1 px-4 rounded-2xl transition ${activeTab === 'home' ? 'text-emerald-400 font-bold' : 'text-neutral-400 hover:text-neutral-200'}`}
           >
             <PawPrint className="w-5 h-5" />
             <span className="text-[10px]">Home</span>
@@ -495,7 +533,7 @@ export default function App() {
           
           <button 
             onClick={() => setActiveTab('donate')}
-            className={`flex flex-col items-center gap-1 py-1 px-3 rounded-2xl transition ${activeTab === 'donate' ? 'text-emerald-400 font-bold' : 'text-neutral-400 hover:text-neutral-200'}`}
+            className={`flex flex-col items-center gap-1 py-1 px-4 rounded-2xl transition ${activeTab === 'donate' ? 'text-emerald-400 font-bold' : 'text-neutral-400 hover:text-neutral-200'}`}
           >
             <DollarSign className="w-5 h-5" />
             <span className="text-[10px]">Donate</span>
@@ -503,18 +541,10 @@ export default function App() {
 
           <button 
             onClick={() => setActiveTab('booth')}
-            className={`flex flex-col items-center gap-1 py-1 px-3 rounded-2xl transition ${activeTab === 'booth' ? 'text-emerald-400 font-bold' : 'text-neutral-400 hover:text-neutral-200'}`}
+            className={`flex flex-col items-center gap-1 py-1 px-4 rounded-2xl transition ${activeTab === 'booth' ? 'text-emerald-400 font-bold' : 'text-neutral-400 hover:text-neutral-200'}`}
           >
             <Camera className="w-5 h-5" />
             <span className="text-[10px]">Booth</span>
-          </button>
-
-          <button 
-            onClick={() => setActiveTab('tour')}
-            className={`flex flex-col items-center gap-1 py-1 px-3 rounded-2xl transition ${activeTab === 'tour' ? 'text-emerald-400 font-bold' : 'text-neutral-400 hover:text-neutral-200'}`}
-          >
-            <Globe className="w-5 h-5" />
-            <span className="text-[10px]">World Tour</span>
           </button>
         </nav>
 
@@ -524,7 +554,7 @@ export default function App() {
             <div className="bg-neutral-900 border border-neutral-800 rounded-3xl max-w-xs w-full p-6 text-center space-y-4 shadow-2xl relative overflow-hidden">
               <div className="absolute top-0 left-0 right-0 h-1.5 bg-gradient-to-r from-emerald-400 to-neutral-700"></div>
               
-              <div className="w-16 h-16 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 rounded-full flex items-center justify-center mx-auto text-3xl shadow-inner animate-bounce">
+              <div className="w-16 h-16 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 rounded-full flex items-center justify-center mx-auto text-3xl shadow-inner">
                 🎉
               </div>
 
@@ -539,12 +569,24 @@ export default function App() {
                 "Bork! Thanks for supporting my mission!" — Stan 🐾
               </div>
 
-              <button
-                onClick={() => setSuccessModal(null)}
-                className="w-full bg-emerald-500 hover:bg-emerald-400 text-neutral-950 font-bold py-3 rounded-2xl transition text-xs shadow-lg"
-              >
-                Back to Stan's Mission
-              </button>
+              <div className="space-y-2">
+                {successModal.stripeUrl && successModal.stripeUrl.startsWith('http') && (
+                  <a
+                    href={successModal.stripeUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="w-full bg-emerald-500 hover:bg-emerald-400 text-neutral-950 font-extrabold py-3 rounded-2xl transition text-xs shadow-lg flex items-center justify-center gap-1.5"
+                  >
+                    Proceed to Stripe Checkout <ExternalLink className="w-3.5 h-3.5" />
+                  </a>
+                )}
+                <button
+                  onClick={() => setSuccessModal(null)}
+                  className="w-full bg-neutral-800 hover:bg-neutral-700 text-neutral-200 font-bold py-3 rounded-2xl transition text-xs"
+                >
+                  Close & Return
+                </button>
+              </div>
             </div>
           </div>
         )}
@@ -566,7 +608,7 @@ export default function App() {
               </div>
 
               <div className="bg-neutral-950 p-6 rounded-2xl border border-neutral-800 flex flex-col items-center justify-center space-y-3">
-                <div className="w-36 h-36 bg-neutral-900 rounded-xl border border-neutral-800 flex items-center justify-center relative overflow-hidden group">
+                <div className="w-36 h-36 bg-neutral-900 rounded-xl border border-neutral-800 flex items-center justify-center relative overflow-hidden">
                   <div className="grid grid-cols-6 gap-1 w-28 h-28 p-1 bg-neutral-950 rounded-lg">
                     {Array.from({length: 36}).map((_, i) => (
                       <div key={i} className={`rounded-2xs ${i % 2 === 0 || i % 5 === 0 ? 'bg-emerald-400' : 'bg-neutral-800'}`}></div>
@@ -595,35 +637,3 @@ export default function App() {
     </div>
   );
 }
-
-// Data for Washtenaw Charities
-const washtenawCharities = [
-  {
-    id: 'hshv',
-    name: 'Humane Society of Huron Valley (HSHV)',
-    description: 'Providing compassionate care, shelter, and medical support for animals in Washtenaw County.',
-    goal: '$5,000',
-    icon: '🏡'
-  },
-  {
-    id: 'safehouse',
-    name: 'SafeHouse & Pet Shelter Alliance',
-    description: 'Ensuring pets of families in transition remain safe and cared for in our community.',
-    goal: '$2,500',
-    icon: '❤️'
-  },
-  {
-    id: 'washtenaw_rescue',
-    name: 'Washtenaw County Dog Rescue Network',
-    description: 'Volunteer-driven foster network rescuing senior and special-needs pups.',
-    goal: '$3,500',
-    icon: '🐶'
-  },
-  {
-    id: 'community_fund',
-    name: 'Stan’s General Treat & Outreach Fund',
-    description: 'Direct community fund for local dog park improvements and emergency vet care assistance.',
-    goal: '$1,500',
-    icon: '✨'
-  }
-];
